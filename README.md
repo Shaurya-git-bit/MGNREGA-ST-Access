@@ -10,7 +10,7 @@ An early-warning system built on 9 years of village-level MGNREGA data from Megh
 
 MGNREGA guarantees rural households up to 100 days of paid work a year. It is the world's largest public employment programme, covering over 25 crore registered workers. But a job card does not guarantee work.
 
-Across Meghalaya, ST households consistently receive employment at lower rates than other households. We analysed **57,835 records across 5,990 villages** and found that **13.3% of villages had ST employment access below 30% in three or more of the last nine years**. Not a bad year here and there. The same villages, falling short year after year.
+Across Meghalaya, ST households consistently receive employment at lower rates than other households. We analysed **57,835 records across 7,273 unique villages** and found that a persistent minority of villages had ST employment access below 30% in three or more of the last nine years. Not a bad year here and there. The same villages, falling short year after year.
 
 Today, this pattern only becomes visible in retrospective reports and annual social audits, long after the missed workdays are gone. Officers have no way to know, going into a new season, which villages are likely to repeat the pattern.
 
@@ -19,6 +19,8 @@ Today, this pattern only becomes visible in retrospective reports and annual soc
 A predictive model that looks at each village's history (job cards, employment, and persondays over prior years) and flags, at the start of each fiscal year, which villages are at high risk of another low-access year.
 
 **The innovation is not discovering the gap. That is already documented. The innovation is turning nine years of scattered annual snapshots into a forward-looking risk signal officers can act on before a village's next bad year even begins.**
+
+Across four unseen years, reviewing the top 20% of flagged villages reached **72–76%** of the villages that ended up low-access.
 
 ---
 
@@ -37,7 +39,7 @@ A predictive model that looks at each village's history (job cards, employment, 
 1. **Data:** NDAP MGNREGA village-level export, Meghalaya, fiscal years 2014 to 2021.
 2. **Feature engineering:** Lagged access rates (1, 2, 3 years), 3-year rolling average, year-over-year change, workdays per employed household, 100-day completion rate, and ST share of job cards. All lag and rolling features are built with `.shift()` so they stay leakage-free.
 3. **Label:** `is_low_access_current = 1` if ST access rate is below 30% in that village-year.
-4. **Model:** XGBoost, tuned with `TimeSeriesSplit` cross-validation, scored on `average_precision` (PR-AUC). Benchmarked against LightGBM and CatBoost.
+4. **Model:** XGBoost, tuned with `TimeSeriesSplit` cross-validation, scored on `average_precision` (PR-AUC). Benchmarked against LightGBM and CatBoost on the same time-based split. XGBoost gave the best PR-AUC and the cleanest SHAP explanations, so it was chosen as the final model.
 5. **Explainability:** SHAP TreeExplainer produces per-village reasons for each flag.
 6. **Output:** `village_risk_2021.csv`, a ranked watchlist with risk score and top-3 reasons per village.
 7. **Dashboard:** A Streamlit app for Block Programme Officers.
@@ -50,39 +52,69 @@ A predictive model that looks at each village's history (job cards, employment, 
 
 ## Results
 
-Across four unseen years (2018 to 2021), reviewing the **top 20%** of villages ranked by the model reached roughly **72 to 76%** of the villages that actually ended up low-access. Random visits reach about 20%.
+### How the model was chosen
 
-## Results
+Three gradient-boosted tree models were tuned on the same time-based split, each with `TimeSeriesSplit` cross-validation and scored on `average_precision` (PR-AUC). PR-AUC is the right metric here because only ~5–6% of village-years are low-access: accuracy would be misleading, and PR-AUC measures how well the model separates the rare positive class from the rest.
 
-### Model Performance (2021 held-out test)
+CatBoost was weakest (PR-AUC 0.319). LightGBM (0.393) and XGBoost (0.394) were effectively tied on PR-AUC. XGBoost was chosen as the final model because it matched the best PR-AUC and produced the cleanest, most stable SHAP explanations — which is what powers the per-village reason strings in the dashboard.
+
+An ablation run then tested three variants on the same split:
+
+- **A) Baseline** (all features, persondays NaN kept as NaN): PR-AUC 0.393, recall@top20% 70.1%
+- **B) Fill persondays NaN with 0:** PR-AUC 0.393, recall@top20% 69.9%
+- **C) B + drop year/district-rate fingerprint features:** PR-AUC **0.407**, recall@top20% **73.9%**
+
+Version C was kept, since dropping the year/district-rate features improved both PR-AUC and recall while removing features that could act as a year fingerprint.
+
+### Model performance (2021 held-out test)
 
 | Model | PR-AUC | Recall @ top 20% |
 |---|---|---|
-| Naive rule ("low last year → low this year") | baseline | compare |
-| XGBoost (final) | 0.XX | 0.XX |
-| LightGBM | 0.XX | 0.XX |
-| CatBoost | 0.XX | 0.XX |
+| Random baseline (base rate) | 0.056 | ~20% |
+| Naive rule ("low last year → low this year") | — | 33.6% |
+| XGBoost (final) | 0.394 | 71.6% |
+| LightGBM | 0.393 | 70.1% |
+| CatBoost | 0.319 | 58.6% |
 
-Random baseline = 0.18 (the base rate).
+The naive rule ("if a village was low-access last year, flag it again") achieves only 33.6% recall at a 3.8% flag rate. The model reaches 71.6% recall when reviewing the top 20% of villages — a substantial lift over the obvious baseline.
 
-### Why XGBoost was chosen
+### How recall is calculated
 
-Tuned with `TimeSeriesSplit` on `average_precision`. Benchmarked against LightGBM and CatBoost on the same time-based split. XGBoost gave the best PR-AUC and the cleanest SHAP explanations.
+For each village in the 2021 test set, the model outputs a risk score. Villages are ranked by that score from highest to lowest. If an officer reviews the top K% of ranked villages, "recall at top K%" is the share of all actually low-access villages in 2021 that fall inside that reviewed set:
 
-### Recall at review budget
 
-If officers can only visit the top K% of villages (ranked by model):
+Precision at the same cutoff is the share of reviewed villages that were actually low-access:
+
+This mirrors the real decision a Block Programme Officer makes: "I have limited time, so I will look at the top X% of the list." It rewards models that put true positives near the top.
+
+### Recall at review budget (2021)
 
 | Top K% reviewed | Recall | Precision |
 |---|---|---|
-| 5% | XX% | XX% |
-| 10% | XX% | XX% |
-| 20% | XX% | XX% |
-| 30% | XX% | XX% |
+| 5% | 37.1% | 41.4% |
+| 10% | 51.0% | 28.4% |
+| 15% | 63.2% | 23.5% |
+| 20% | 71.6% | 20.0% |
+| 30% | 81.4% | 15.1% |
+
+At a 5% review budget the model is highly precise (41.4% of reviewed villages were truly low-access, versus a 5.6% base rate). At 20% review it catches 71.6% of all low-access villages. This is the "watchlist" tradeoff: the more villages an officer reviews, the more of the true cases they catch, but the lower the hit rate.
+
+### Backtest across unseen years (XGBoost)
+
+To confirm the model is not overfit to one year, the same pipeline was retrained on all years before each test year and evaluated on that year alone:
+
+| Test year | Base rate | PR-AUC | Recall @ top 20% | Naive recall |
+|---|---|---|---|---|
+| 2018 | 0.058 | 0.381 | 76.0% | 56.3% |
+| 2019 | 0.042 | 0.361 | 73.6% | 49.6% |
+| 2020 | 0.037 | 0.438 | 76.3% | 49.6% |
+| 2021 | 0.056 | 0.415 | 71.9% | 33.6% |
+
+PR-AUC stays in the 0.36–0.44 range across four completely unseen years, and recall@top20% stays in the 72–76% range. The naive rule degrades badly over time (56% → 34%), while the model stays stable. This is the strongest evidence that the signal is real and generalizable, not a single-year fluke.
 
 ### Threshold
 
-Threshold chosen on validation years (2019–2020) for a recall target, then applied to 2021. No peeking at test data.
+The decision threshold is set on the validation years (2019–2020) using a recall target, then applied unchanged to 2021. This means the test year is never used to choose the threshold. For an 80% recall target, validation picks a threshold of 0.162, which on 2021 delivers 76.5% recall at 17.7% precision, flagging ~24% of villages. Lower thresholds push recall toward 99% but flag most of the dataset, which is why the dashboard frames the output as a watchlist rather than a binary decision.
 
 ---
 
